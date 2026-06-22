@@ -94,6 +94,7 @@ export const hosts = sqliteTable("ssh_data", {
   tags: text("tags"),
   pin: integer("pin", { mode: "boolean" }).notNull().default(false),
   authType: text("auth_type").notNull(),
+  useWarpgate: integer("use_warpgate", { mode: "boolean" }).notNull().default(false),
   forceKeyboardInteractive: text("force_keyboard_interactive"),
 
   password: text("password"),
@@ -127,6 +128,7 @@ export const hosts = sqliteTable("ssh_data", {
   enableFileManager: integer("enable_file_manager", { mode: "boolean" })
     .notNull()
     .default(true),
+  scpLegacy: integer("scp_legacy", { mode: "boolean" }).notNull().default(false),
   enableDocker: integer("enable_docker", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -168,17 +170,24 @@ export const hosts = sqliteTable("ssh_data", {
   vncPort: integer("vnc_port").default(5900),
   telnetPort: integer("telnet_port").default(23),
 
+  rdpCredentialId: integer("rdp_credential_id").references(() => sshCredentials.id, { onDelete: "set null" }),
   rdpUser: text("rdp_user"),
   rdpPassword: text("rdp_password"),
   rdpDomain: text("rdp_domain"),
   rdpSecurity: text("rdp_security"),
   rdpIgnoreCert: integer("rdp_ignore_cert", { mode: "boolean" }).default(false),
 
+  vncCredentialId: integer("vnc_credential_id").references(() => sshCredentials.id, { onDelete: "set null" }),
   vncPassword: text("vnc_password"),
   vncUser: text("vnc_user"),
 
   telnetUser: text("telnet_user"),
   telnetPassword: text("telnet_password"),
+  telnetCredentialId: integer("telnet_credential_id").references(() => sshCredentials.id, { onDelete: "set null" }),
+
+  rdpAuthType: text("rdp_auth_type"),
+  vncAuthType: text("vnc_auth_type"),
+  telnetAuthType: text("telnet_auth_type"),
 
   domain: text("domain"),
   security: text("security"),
@@ -193,6 +202,7 @@ export const hosts = sqliteTable("ssh_data", {
   socks5ProxyChain: text("socks5_proxy_chain"),
 
   macAddress: text("mac_address"),
+  wolBroadcastAddress: text("wol_broadcast_address"),
   portKnockSequence: text("port_knock_sequence"),
 
   hostKeyFingerprint: text("host_key_fingerprint"),
@@ -705,6 +715,8 @@ export const userPreferences = sqliteTable("user_preferences", {
   disableUpdateCheck: integer("disable_update_check", { mode: "boolean" }),
   confirmTabClose: integer("confirm_tab_close", { mode: "boolean" }),
   hiddenRailTabs: text("hidden_rail_tabs"),
+  compactHostView: integer("compact_host_view", { mode: "boolean" }),
+  statusColorScheme: text("status_color_scheme"),
   updatedAt: text("updated_at")
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
@@ -762,6 +774,92 @@ export const hostHealthHistory = sqliteTable("host_health_history", {
   latencyMs: integer("latency_ms"),
   detail: text("detail"),
 });
+
+export const dashboardServiceLinks = sqliteTable("dashboard_service_links", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  url: text("url").notNull(),
+  order: integer("order").notNull().default(0),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+// --- termix-id begin ---
+// A user claims a unique public handle. Their published SSH public keys are
+// served at an unauthenticated resolver endpoint in authorized_keys format,
+// so any server can be provisioned with `curl <host>/termix-id/u/<handle> >> ~/.ssh/authorized_keys`.
+export const termixIdentities = sqliteTable("termix_identities", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // One Termix ID per user — enforced in schema, not just in code.
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
+  handle: text("handle").notNull().unique(),
+  description: text("description"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const termixIdentityKeys = sqliteTable("termix_identity_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  identityId: integer("identity_id")
+    .notNull()
+    .references(() => termixIdentities.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  // Public keys are non-secret, so they are stored in plaintext (no field-level
+  // encryption). This is what lets the unauthenticated resolver serve them.
+  publicKey: text("public_key", { length: 8192 }).notNull(),
+  // Raw algorithm token (e.g. "ssh-ed25519"), and a normalized group used for
+  // the /<ALGO> resolver filter (RSA / ED25519 / ECDSA / ...).
+  keyType: text("key_type").notNull(),
+  algorithm: text("algorithm").notNull(),
+  label: text("label"),
+  comment: text("comment"),
+  // "manual" (pasted) or "credential" (imported from an ssh_credentials entry).
+  source: text("source").notNull().default("manual"),
+  credentialId: integer("credential_id").references(() => sshCredentials.id, {
+    onDelete: "set null",
+  }),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+// Per-identity certificate authority. Servers that trust this CA (via
+// TrustedUserCAKeys / @cert-authority) accept any user certificate it signs,
+// giving central revocation (rotate the CA) and expiry (cert validity).
+export const termixIdentityCa = sqliteTable("termix_identity_ca", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  identityId: integer("identity_id")
+    .notNull()
+    .unique()
+    .references(() => termixIdentities.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  // CA public key (plaintext — it is published); CA private key is field-encrypted.
+  publicKey: text("public_key", { length: 4096 }).notNull(),
+  privateKey: text("private_key", { length: 8192 }).notNull(),
+  validityDays: integer("validity_days").notNull().default(90),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+// --- termix-id end ---
 
 // --- tmux-monitor begin ---
 export const tmuxSessionTags = sqliteTable("tmux_session_tags", {
